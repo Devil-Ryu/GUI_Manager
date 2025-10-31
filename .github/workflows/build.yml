@@ -1,0 +1,67 @@
+name: Build Binaries
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch: {}
+
+jobs:
+  build:
+    name: Build (${{ matrix.os }} - ${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # macOS Intel (x86_64)
+          - os: macOS
+            arch: x86_64
+            runner: macos-13
+          # macOS Apple Silicon (arm64)
+          - os: macOS
+            arch: arm64
+            runner: macos-14
+          # Windows x64
+          - os: Windows
+            arch: x86_64
+            runner: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+          cache: 'pip'
+
+      - name: Install build dependencies
+        run: |
+          python -m pip install --upgrade pip wheel
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: Build with PyInstaller
+        shell: bash
+        run: |
+          pyinstaller --name GUI_Manager --onefile --noconsole main.py
+
+      - name: Collect artifact path
+        id: artifact
+        shell: bash
+        run: |
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            echo "path=dist/GUI_Manager.exe" >> $GITHUB_OUTPUT
+          else
+            echo "path=dist/GUI_Manager" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: GUI_Manager-${{ matrix.os }}-${{ matrix.arch }}
+          path: ${{ steps.artifact.outputs.path }}
+          if-no-files-found: error
