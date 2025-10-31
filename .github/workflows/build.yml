@@ -3,6 +3,7 @@ name: Build Binaries
 on:
   push:
     branches: [ main ]
+    tags: [ 'v*' ]
   pull_request:
     branches: [ main ]
   workflow_dispatch: {}
@@ -44,15 +45,81 @@ jobs:
           pip install -r requirements.txt
           pip install pyinstaller
 
+      - name: Prepare platform resources (icons/version)
+        shell: bash
+        run: |
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            python - << 'PY'
+import os
+from PIL import Image, ImageDraw, ImageFont
+
+os.makedirs('build_assets', exist_ok=True)
+img = Image.new('RGBA', (256, 256), (30, 30, 30, 255))
+d = ImageDraw.Draw(img)
+d.rectangle((28, 28, 228, 228), outline=(0, 200, 255, 255), width=6)
+d.text((50, 96), 'GUI', fill=(255,255,255,255))
+img.save('build_assets/icon.ico', sizes=[(256,256), (128,128), (64,64), (48,48), (32,32), (16,16)])
+
+with open('build_assets/version.txt', 'w', encoding='utf-8') as f:
+    f.write("""
+VSVersionInfo(
+  ffi=FixedFileInfo(
+    filevers=(1, 0, 0, 0),
+    prodvers=(1, 0, 0, 0),
+    mask=0x3f,
+    flags=0x0,
+    OS=0x40004,
+    fileType=0x1,
+    subtype=0x0,
+    date=(0, 0)
+  ),
+  kids=[
+    StringFileInfo([
+      StringTable('040904B0', [
+        StringStruct('CompanyName', 'GUI_Manager'),
+        StringStruct('FileDescription', 'GUI Manager'),
+        StringStruct('FileVersion', '1.0.0'),
+        StringStruct('InternalName', 'GUI_Manager'),
+        StringStruct('OriginalFilename', 'GUI_Manager.exe'),
+        StringStruct('ProductName', 'GUI Manager'),
+        StringStruct('ProductVersion', '1.0.0')
+      ])
+    ]),
+    VarFileInfo([VarStruct('Translation', [1033, 1200])])
+  ]
+)
+""")
+PY
+          fi
+
       - name: Build with PyInstaller
         shell: bash
         run: |
-          pyinstaller \
-            --name GUI_Manager \
-            --onefile \
-            --noconsole \
-            --collect-all PySide6 \
-            main.py
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            pyinstaller \
+              --name GUI_Manager \
+              --onefile \
+              --noconsole \
+              --collect-all PySide6 \
+              --icon build_assets/icon.ico \
+              --version-file build_assets/version.txt \
+              main.py
+          else
+            # macOS: 生成 .app（onedir）
+            pyinstaller \
+              --name GUI_Manager \
+              --windowed \
+              --onedir \
+              --collect-all PySide6 \
+              main.py
+            # 兼容：额外生成 onefile 便于 CLI 使用
+            pyinstaller \
+              --name GUI_Manager \
+              --onefile \
+              --noconsole \
+              --collect-all PySide6 \
+              main.py
+          fi
 
       - name: Collect artifact path
         id: artifact
@@ -61,7 +128,13 @@ jobs:
           if [[ "$RUNNER_OS" == "Windows" ]]; then
             echo "path=dist/GUI_Manager.exe" >> $GITHUB_OUTPUT
           else
+            # 上传 onefile 与 .app（打包为 zip）
             echo "path=dist/GUI_Manager" >> $GITHUB_OUTPUT
+            if [[ -d "dist/GUI_Manager.app" ]]; then
+              pushd dist >/dev/null
+              zip -r GUI_Manager.app.zip GUI_Manager.app
+              popd >/dev/null
+            fi
           fi
 
       - name: Upload artifact
@@ -70,6 +143,14 @@ jobs:
           name: GUI_Manager-${{ matrix.os }}-${{ matrix.arch }}
           path: ${{ steps.artifact.outputs.path }}
           if-no-files-found: error
+
+      - name: Upload macOS .app zip (if exists)
+        if: runner.os == 'macOS' && hashFiles('dist/GUI_Manager.app.zip') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: GUI_Manager-${{ matrix.os }}-${{ matrix.arch }}-app
+          path: dist/GUI_Manager.app.zip
+          if-no-files-found: ignore
 
       - name: Upload build logs (always)
         if: always()
@@ -81,3 +162,26 @@ jobs:
             dist/
             *.spec
           if-no-files-found: ignore
+
+  release:
+    name: Release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Display downloaded files
+        run: |
+          ls -R artifacts
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            artifacts/**
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
