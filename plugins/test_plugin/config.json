@@ -1,0 +1,16 @@
+{
+    "plugin_id": "test_plugin",
+    "plugin_name": "Test Plugin1",
+    "has_ui": false,
+    "plugin_entry": "test.py",
+    "plugin_function": "testB",
+    "parameters": [
+        {
+            "name": "test_param",
+            "type": "integer",
+            "label": "测试参数",
+            "description": "",
+            "value": 1
+        }
+    ]
+}
