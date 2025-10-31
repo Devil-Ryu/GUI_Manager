@@ -47,7 +47,12 @@ jobs:
       - name: Build with PyInstaller
         shell: bash
         run: |
-          pyinstaller --name GUI_Manager --onefile --noconsole main.py
+          pyinstaller \
+            --name GUI_Manager \
+            --onefile \
+            --noconsole \
+            --collect-all PySide6 \
+            main.py
 
       - name: Collect artifact path
         id: artifact
@@ -65,3 +70,14 @@ jobs:
           name: GUI_Manager-${{ matrix.os }}-${{ matrix.arch }}
           path: ${{ steps.artifact.outputs.path }}
           if-no-files-found: error
+
+      - name: Upload build logs (always)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: logs-${{ matrix.os }}-${{ matrix.arch }}
+          path: |
+            build/
+            dist/
+            *.spec
+          if-no-files-found: ignore
