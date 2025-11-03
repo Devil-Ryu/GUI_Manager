@@ -25,7 +25,42 @@ def ansi_to_html(text: str) -> str:
     if not isinstance(text, str):
         text = str(text)
     
-    # ANSI 颜色码映射
+    # 先处理 OSC 8 超链接与其他 OSC 序列，防止出现 "]8;..." 残留
+    # 格式： ESC ] 8 ; params ; URI ST text ESC ] 8 ; ; ST
+    # ST 可以是 BEL(\x07) 或 ESC \
+    def _osc_st_pattern():
+        return r"(?:\x07|\x1b\\)"  # BEL 或 ESC \
+
+    # 将 OSC 8 超链接转换为 HTML 超链接，占位保护后再统一转义
+    try:
+        osc8_link_pattern = rf"\x1b\]8;[^\x1b\x07]*;([^\x1b\x07]+){_osc_st_pattern()}(.*? )?\x1b\]8;;{_osc_st_pattern()}"
+    except Exception:
+        osc8_link_pattern = r"\x1b\]8;[^]*;([^]+)(?:|\")(.*? )?\x1b\]8;;(?:|\")"
+
+    # 收集生成的占位符
+    link_placeholders = {}
+    link_counter = 0
+
+    def _replace_osc8(m):
+        nonlocal link_counter
+        url = m.group(1) or ""
+        text_part = (m.group(2) or "").rstrip(" ")
+        ph = f"__A_PLACEHOLDER_{link_counter}__"
+        # 直接生成 a 标签，稍后与 span 一起做保护
+        link_placeholders[ph] = f"<a href=\"{url}\" target=\"_blank\">{text_part}</a>"
+        link_counter += 1
+        return ph
+
+    try:
+        # 先替换所有 OSC8 超链接
+        import re as _re_oscl
+        text = _re_oscl.sub(osc8_link_pattern, _replace_osc8, text, flags=_re_oscl.DOTALL)
+        # 其余 OSC 序列（如设置标题等）直接去掉
+        text = _re_oscl.sub(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)", "", text)
+    except Exception:
+        pass
+
+    # ANSI 颜色码映射（基础 16 色）
     # 基本颜色
     color_map = {
         30: '#000000',  # 黑色
@@ -46,7 +81,7 @@ def ansi_to_html(text: str) -> str:
         97: '#E5E5E5',  # 亮白
     }
     
-    # 背景颜色码映射
+    # 背景颜色码映射（基础 16 色）
     bg_color_map = {
         40: '#000000',  # 黑色背景
         41: '#CD3131',  # 红色背景
@@ -67,10 +102,45 @@ def ansi_to_html(text: str) -> str:
     # 匹配格式: \x1B[或\033[或\u001b[ 后跟数字和分号，最后是 m
     ansi_pattern = r'(?:\x1B\[|\033\[|\u001b\[)([0-9;]*)m'
     
+    def _color256_to_hex(n: int) -> str | None:
+        """将 0-255 的 ANSI 256 色转换为十六进制颜色。"""
+        try:
+            n = int(n)
+        except Exception:
+            return None
+        if n < 0 or n > 255:
+            return None
+        # 0-15: 标准与亮色（近似映射到基础色）
+        basic_map = {
+            0:  "#000000", 1:  "#CD3131", 2:  "#0DBC79", 3:  "#E5E510",
+            4:  "#2472C8", 5:  "#BC3FBC", 6:  "#11A8CD", 7:  "#E5E5E5",
+            8:  "#666666", 9:  "#F14C4C", 10: "#23D18B", 11: "#F5F543",
+            12: "#3B8EEA", 13: "#D670D6", 14: "#29B8DB", 15: "#E5E5E5",
+        }
+        if n <= 15:
+            return basic_map.get(n)
+        # 16-231: 6x6x6 色立方
+        if 16 <= n <= 231:
+            n -= 16
+            r = (n // 36) % 6
+            g = (n // 6) % 6
+            b = n % 6
+            def level(x):
+                return 0 if x == 0 else 55 + 40 * x
+            return f"#{level(r):02x}{level(g):02x}{level(b):02x}"
+        # 232-255: 灰度 (8..238 step 10)
+        if 232 <= n <= 255:
+            v = 8 + (n - 232) * 10
+            return f"#{v:02x}{v:02x}{v:02x}"
+        return None
+
+    open_spans = 0
+
     def replace_ansi(match):
+        nonlocal open_spans
         codes = match.group(1).split(';')
         if not codes or codes == ['']:
-            return '</span>'
+            return '</span>' if open_spans > 0 else ''
         
         styles = []
         fg_color = None
@@ -80,32 +150,80 @@ def ansi_to_html(text: str) -> str:
         italic = False
         underline = False
         
-        for code_str in codes:
+        i = 0
+        while i < len(codes):
+            code_str = codes[i]
             if not code_str:
+                i += 1
                 continue
             try:
                 code = int(code_str)
-                
-                if code == 0:
-                    return '</span>'
-                elif code == 1:
-                    bold = True
-                elif code == 2:
-                    dim = True
-                elif code == 3:
-                    italic = True
-                elif code == 4:
-                    underline = True
-                elif 30 <= code <= 37:
-                    fg_color = color_map.get(code)
-                elif 40 <= code <= 47:
-                    bg_color = bg_color_map.get(code)
-                elif 90 <= code <= 97:
-                    fg_color = color_map.get(code)
-                elif 100 <= code <= 107:
-                    bg_color = bg_color_map.get(code - 60)
             except ValueError:
+                i += 1
                 continue
+
+            if code == 0:
+                # 重置：仅在存在已开启样式时输出闭合
+                if open_spans > 0:
+                    open_spans -= 1
+                    return '</span>'
+                else:
+                    return ''
+            elif code == 1:
+                bold = True
+            elif code == 2:
+                dim = True
+            elif code == 3:
+                italic = True
+            elif code == 4:
+                underline = True
+            elif 30 <= code <= 37:
+                fg_color = color_map.get(code)
+            elif 40 <= code <= 47:
+                bg_color = bg_color_map.get(code)
+            elif 90 <= code <= 97:
+                fg_color = color_map.get(code)
+            elif 100 <= code <= 107:
+                bg_color = bg_color_map.get(code - 60)
+            elif code == 38:
+                # 扩展前景色：38;5;n 或 38;2;r;g;b
+                if i + 1 < len(codes):
+                    try:
+                        mode = int(codes[i + 1])
+                    except Exception:
+                        mode = None
+                    if mode == 5 and i + 2 < len(codes):
+                        fg_color = _color256_to_hex(codes[i + 2])
+                        i += 2
+                    elif mode == 2 and i + 4 < len(codes):
+                        try:
+                            r = max(0, min(255, int(codes[i + 2])))
+                            g = max(0, min(255, int(codes[i + 3])))
+                            b = max(0, min(255, int(codes[i + 4])))
+                            fg_color = f"#{r:02x}{g:02x}{b:02x}"
+                            i += 4
+                        except Exception:
+                            pass
+            elif code == 48:
+                # 扩展背景色：48;5;n 或 48;2;r;g;b
+                if i + 1 < len(codes):
+                    try:
+                        mode = int(codes[i + 1])
+                    except Exception:
+                        mode = None
+                    if mode == 5 and i + 2 < len(codes):
+                        bg_color = _color256_to_hex(codes[i + 2])
+                        i += 2
+                    elif mode == 2 and i + 4 < len(codes):
+                        try:
+                            r = max(0, min(255, int(codes[i + 2])))
+                            g = max(0, min(255, int(codes[i + 3])))
+                            b = max(0, min(255, int(codes[i + 4])))
+                            bg_color = f"#{r:02x}{g:02x}{b:02x}"
+                            i += 4
+                        except Exception:
+                            pass
+            i += 1
         
         # 构建样式字符串
         style_parts = []
@@ -123,6 +241,7 @@ def ansi_to_html(text: str) -> str:
             style_parts.append('text-decoration: underline')
         
         if style_parts:
+            open_spans += 1
             return f'<span style="{"; ".join(style_parts)}">'
         return ''
     
@@ -141,24 +260,28 @@ def ansi_to_html(text: str) -> str:
         placeholder_counter += 1
         return placeholder
     
-    # 保护已添加的 span 标签
-    text = re.sub(r'<span[^>]*>|</span>', protect_span, text)
+    # 保护已添加的 span/a 标签
+    text = re.sub(r'<span[^>]*>|</span>|<a[^>]*>|</a>', protect_span, text)
     
     # 转义 HTML 特殊字符
     text = html.escape(text)
     
-    # 恢复 span 标签
+    # 恢复 span/a 标签与超链接占位
     for placeholder, original in span_placeholders.items():
         text = text.replace(placeholder, original)
+    for placeholder, original in link_placeholders.items():
+        text = text.replace(placeholder, original)
     
-    # 保留换行符用于多行显示，转换为 HTML 换行
-    text = text.replace('\n', '<br>')
-    text = text.replace('\r', '')
+    # 不在此处处理换行符；上层逐行插入并追加 <br/>
     
     # 计算打开的 span 标签数量，确保在文本末尾关闭所有标签
     open_span_count = text.count('<span') - text.count('</span>')
     if open_span_count > 0:
         text += '</span>' * open_span_count
+
+    # 若无任何 span 标签（即该行没有 ANSI），仍包一层 span，强制以富文本模式渲染，从而解析 HTML 实体
+    if '<span' not in text:
+        text = f"<span>{text}</span>"
     
     return text
 
@@ -695,21 +818,18 @@ class GenericPluginWidget(QWidget):
         self.stop_button.setEnabled(self.is_running)
     
     def append_log(self, message):
-        """添加日志信息，支持 ANSI 彩色文本"""
+        """添加日志信息，支持 ANSI 彩色文本，使用 insertHtml 降低多余空行"""
         try:
             if message is None:
                 return
-            # 将 ANSI 转义序列转换为 HTML 格式
             html_text = ansi_to_html(str(message))
             if html_text:
-                # 使用 append 方法添加 HTML 格式的文本（QTextEdit 已设置 setAcceptRichText(True)）
-                self.log_text.append(html_text)
+                self.log_text.insertHtml(html_text + "<br/>")
         except Exception:
-            # 降级处理：如果转换失败，尝试直接添加文本
             try:
                 plain_text = str(message).replace("\n", "<br>").replace("\r", "")
                 if plain_text:
-                    self.log_text.append(plain_text)
+                    self.log_text.insertHtml(plain_text + "<br/>")
             except Exception:
                 pass
         # 滚动到底部

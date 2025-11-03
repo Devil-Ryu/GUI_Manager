@@ -1,0 +1,8 @@
+{
+    "plugin_id": "test_plugin_case",
+    "plugin_name": "Test Plugin Case",
+    "has_ui": false,
+    "plugin_entry": "rich_print_case.py",
+    "plugin_function": "testRich",
+    "parameters": []
+}

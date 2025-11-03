@@ -124,14 +124,18 @@ class _ThreadLocalStdout:
                 return _original_stdout.write(text)
             if not isinstance(text, str):
                 return
-            # 规范换行（Windows/TTY/富文本库可能输出 \r 或 \r\n）
-            # 统一为 \n，避免在 Windows 上被拆成多条
-            if "\r" in text:
-                text = text.replace("\r\n", "\n").replace("\r", "\n")
-            # 按线程缓冲，直到遇到换行再输出，避免彩色日志被拆分成多段
+            # 规范 CRLF -> LF，但保留裸 CR 作为回车覆写信号，避免拆为多行
+            text = text.replace("\r\n", "\n")
+
             tid = threading.get_ident()
             buf = _stdout_buffers.get(tid, "") + text
-            # 逐行提交（保留最后一段未以换行结束的部分在缓冲中）
+
+            # 处理裸回车：将其视为行内覆写，保留最后一段
+            if "\r" in buf:
+                parts = buf.split("\r")
+                buf = parts[-1]
+
+            # 逐行提交（仅遇到 LF 才输出一行）
             while True:
                 nl = buf.find("\n")
                 if nl == -1:
@@ -216,11 +220,15 @@ class _ThreadLocalStderr:
                 return _original_stderr.write(text)
             if not isinstance(text, str):
                 return
-            # 规范换行，统一为 \n
-            if "\r" in text:
-                text = text.replace("\r\n", "\n").replace("\r", "\n")
+            # 规范 CRLF -> LF，但保留裸 CR 作为回车覆写信号
+            text = text.replace("\r\n", "\n")
             tid = threading.get_ident()
             buf = _stderr_buffers.get(tid, "") + text
+
+            if "\r" in buf:
+                parts = buf.split("\r")
+                buf = parts[-1]
+
             while True:
                 nl = buf.find("\n")
                 if nl == -1:
@@ -820,6 +828,48 @@ class BasePlugin(ABC):
                     _switched = True
             except Exception:
                 _switched = False
+            # 在进入 run() 前尽量为 Rich 提供良好的终端能力提示
+            try:
+                import os as _os
+                # 让 Rich 认为有颜色终端
+                _os.environ.setdefault("TERM", "xterm-256color")
+                _os.environ.setdefault("PY_COLORS", "1")
+                _os.environ.setdefault("RICH_FORCE_TERMINAL", "1")
+                # 如果可能，开启真彩色，避免退化为 16 色
+                _os.environ.setdefault("RICH_COLOR_SYSTEM", "truecolor")
+                # 增大终端宽度，减少表格/JSON 的软换行
+                _os.environ.setdefault("COLUMNS", "160")
+                # 强制 rich 使用 VT/ANSI 输出与真彩
+                try:
+                    # 尝试启用 Windows VT 支持
+                    try:
+                        import colorama as _colorama
+                        _colorama.just_fix_windows_console()
+                    except Exception:
+                        pass
+                    import rich as _rich
+                    _rich.reconfigure(
+                        force_terminal=True, legacy_windows=False,
+                        color_system="truecolor", width=160
+                    )
+                    # 全局覆盖 Console() 构造，确保任意 Console() 均启用 ANSI/truecolor/宽度
+                    try:
+                        from rich.console import Console as _Console
+                        from functools import partial as _partial
+                        _rich.console.Console = _partial(
+                            _Console,
+                            force_terminal=True,
+                            legacy_windows=False,
+                            color_system="truecolor",
+                            width=160,
+                        )
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
+            except Exception:
+                pass
+
             self.is_running = True
             self.signals.status_changed.emit(self.plugin_id, "running")
             self.run()
