@@ -954,6 +954,11 @@ class MainWindow(QMainWindow):
             pal.setColor(QPalette.ToolTipBase, QColor(53, 53, 53))
             pal.setColor(QPalette.ToolTipText, QColor(220, 220, 220))
             pal.setColor(QPalette.Text, QColor(220, 220, 220))
+            # 占位符文本颜色（修复 Win10 暗黑模式下输入框文字/占位符过暗的问题）
+            try:
+                pal.setColor(QPalette.PlaceholderText, QColor(160, 160, 160))
+            except Exception:
+                pass
             pal.setColor(QPalette.Button, QColor(53, 53, 53))
             pal.setColor(QPalette.ButtonText, QColor(220, 220, 220))
             pal.setColor(QPalette.BrightText, QColor(255, 0, 0))

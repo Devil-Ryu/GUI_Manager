@@ -4,6 +4,7 @@ import logging
 import traceback
 from PySide6.QtWidgets import QApplication, QMessageBox
 from PySide6.QtCore import Qt
+import platform
 
 # 配置日志
 log_dir = os.path.join(os.path.expanduser('~'), '.config', 'GUI_Manager')
@@ -33,6 +34,15 @@ def main():
     app = QApplication(sys.argv)
     app.setApplicationName("Python脚本管理工具")
     app.setOrganizationName("GUI_Manager")
+    # 在 Windows 10 上强制使用 Fusion 样式，以确保自定义调色板（暗黑/明亮）完全生效
+    try:
+        if sys.platform == 'win32':
+            win_ver = sys.getwindowsversion()
+            # Windows 11 的 build >= 22000；低于此通常为 Windows 10 或更早
+            if getattr(win_ver, 'build', 0) and win_ver.build < 22000:
+                app.setStyle('Fusion')
+    except Exception:
+        pass
     
     # 设置中文字体支持
     font = app.font()
