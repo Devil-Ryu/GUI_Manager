@@ -383,6 +383,7 @@ class GenericPluginWidget(QWidget):
         input_row = QHBoxLayout()
         self.input_edit = QLineEdit()
         self.input_edit.setPlaceholderText("在此输入并提交给脚本…")
+        self.input_edit.returnPressed.connect(self.on_send_input_clicked)  # 按回车提交输入
         self.input_send_btn = QPushButton("提交输入")
         self.input_send_btn.clicked.connect(self.on_send_input_clicked)
         input_row.addWidget(self.input_edit)
