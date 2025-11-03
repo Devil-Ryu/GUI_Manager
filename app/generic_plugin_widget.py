@@ -11,11 +11,156 @@ import json
 import os
 from datetime import datetime
 import logging
+import re
+import html
 from app.plugin_import_dialog import ParameterConfigWidget
 
 # 配置日志
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
+
+
+def ansi_to_html(text: str) -> str:
+    """将 ANSI 转义序列转换为 HTML 格式，支持 rich 库的彩色输出"""
+    if not isinstance(text, str):
+        text = str(text)
+    
+    # ANSI 颜色码映射
+    # 基本颜色
+    color_map = {
+        30: '#000000',  # 黑色
+        31: '#CD3131',  # 红色
+        32: '#0DBC79',  # 绿色
+        33: '#E5E510',  # 黄色
+        34: '#2472C8',  # 蓝色
+        35: '#BC3FBC',  #  magenta
+        36: '#11A8CD',  # 青色
+        37: '#E5E5E5',  # 白色
+        90: '#666666',  # 亮黑/灰色
+        91: '#F14C4C',  # 亮红
+        92: '#23D18B',  # 亮绿
+        93: '#F5F543',  # 亮黄
+        94: '#3B8EEA',  # 亮蓝
+        95: '#D670D6',  # 亮紫
+        96: '#29B8DB',  # 亮青
+        97: '#E5E5E5',  # 亮白
+    }
+    
+    # 背景颜色码映射
+    bg_color_map = {
+        40: '#000000',  # 黑色背景
+        41: '#CD3131',  # 红色背景
+        42: '#0DBC79',  # 绿色背景
+        43: '#E5E510',  # 黄色背景
+        44: '#2472C8',  # 蓝色背景
+        45: '#BC3FBC',  # 紫色背景
+        46: '#11A8CD',  # 青色背景
+        47: '#E5E5E5',  # 白色背景
+    }
+    
+    # 重置所有样式
+    text = text.replace('\x1B[0m', '</span>')
+    text = text.replace('\033[0m', '</span>')
+    text = text.replace('\u001b[0m', '</span>')
+    
+    # 处理 ANSI 转义序列
+    # 匹配格式: \x1B[或\033[或\u001b[ 后跟数字和分号，最后是 m
+    ansi_pattern = r'(?:\x1B\[|\033\[|\u001b\[)([0-9;]*)m'
+    
+    def replace_ansi(match):
+        codes = match.group(1).split(';')
+        if not codes or codes == ['']:
+            return '</span>'
+        
+        styles = []
+        fg_color = None
+        bg_color = None
+        bold = False
+        dim = False
+        italic = False
+        underline = False
+        
+        for code_str in codes:
+            if not code_str:
+                continue
+            try:
+                code = int(code_str)
+                
+                if code == 0:
+                    return '</span>'
+                elif code == 1:
+                    bold = True
+                elif code == 2:
+                    dim = True
+                elif code == 3:
+                    italic = True
+                elif code == 4:
+                    underline = True
+                elif 30 <= code <= 37:
+                    fg_color = color_map.get(code)
+                elif 40 <= code <= 47:
+                    bg_color = bg_color_map.get(code)
+                elif 90 <= code <= 97:
+                    fg_color = color_map.get(code)
+                elif 100 <= code <= 107:
+                    bg_color = bg_color_map.get(code - 60)
+            except ValueError:
+                continue
+        
+        # 构建样式字符串
+        style_parts = []
+        if fg_color:
+            style_parts.append(f'color: {fg_color}')
+        if bg_color:
+            style_parts.append(f'background-color: {bg_color}')
+        if bold:
+            style_parts.append('font-weight: bold')
+        if dim:
+            style_parts.append('opacity: 0.6')
+        if italic:
+            style_parts.append('font-style: italic')
+        if underline:
+            style_parts.append('text-decoration: underline')
+        
+        if style_parts:
+            return f'<span style="{"; ".join(style_parts)}">'
+        return ''
+    
+    # 替换所有 ANSI 序列为 HTML 标签（此时标签还是占位符，不会被转义）
+    text = re.sub(ansi_pattern, replace_ansi, text)
+    
+    # 转义 HTML 特殊字符（转义文本内容，但不影响我们已经添加的 HTML 标签）
+    # 使用占位符保护我们添加的 HTML 标签
+    span_placeholders = {}
+    placeholder_counter = 0
+    
+    def protect_span(match):
+        nonlocal placeholder_counter
+        placeholder = f"__SPAN_PLACEHOLDER_{placeholder_counter}__"
+        span_placeholders[placeholder] = match.group(0)
+        placeholder_counter += 1
+        return placeholder
+    
+    # 保护已添加的 span 标签
+    text = re.sub(r'<span[^>]*>|</span>', protect_span, text)
+    
+    # 转义 HTML 特殊字符
+    text = html.escape(text)
+    
+    # 恢复 span 标签
+    for placeholder, original in span_placeholders.items():
+        text = text.replace(placeholder, original)
+    
+    # 保留换行符用于多行显示，转换为 HTML 换行
+    text = text.replace('\n', '<br>')
+    text = text.replace('\r', '')
+    
+    # 计算打开的 span 标签数量，确保在文本末尾关闭所有标签
+    open_span_count = text.count('<span') - text.count('</span>')
+    if open_span_count > 0:
+        text += '</span>' * open_span_count
+    
+    return text
 
 
 class ParameterEditor(QWidget):
@@ -549,32 +694,22 @@ class GenericPluginWidget(QWidget):
         self.start_button.setEnabled(not self.is_running)
         self.stop_button.setEnabled(self.is_running)
     
-    def _strip_ansi_and_normalize(self, text: str) -> str:
-        """去除ANSI转义序列，并将多行合并为单行"""
-        import re
-        if not isinstance(text, str):
-            text = str(text)
-        # 去除所有ANSI转义序列：支持 \x1B[, \033[, \u001b[ 以及裸 "[...m"
-        pattern = r"(?:\x1B\[|\033\[|\u001b\[|\[)[0-9;]*m"
-        text = re.sub(pattern, "", text)
-        # 将多行合并为单行：将所有换行符、回车符替换为空格
-        text = text.replace("\r\n", " ").replace("\n", " ").replace("\r", " ")
-        # 合并多个连续空格为单个空格
-        text = re.sub(r" +", " ", text)
-        # 去除首尾空格
-        return text.strip()
-
     def append_log(self, message):
-        """添加日志信息"""
+        """添加日志信息，支持 ANSI 彩色文本"""
         try:
-            # 去除ANSI序列并合并多行为单行，输出纯文本日志
-            plain_text = self._strip_ansi_and_normalize(str(message) if message is not None else "")
-            if plain_text:
-                self.log_text.append(plain_text)
+            if message is None:
+                return
+            # 将 ANSI 转义序列转换为 HTML 格式
+            html_text = ansi_to_html(str(message))
+            if html_text:
+                # 使用 append 方法添加 HTML 格式的文本（QTextEdit 已设置 setAcceptRichText(True)）
+                self.log_text.append(html_text)
         except Exception:
+            # 降级处理：如果转换失败，尝试直接添加文本
             try:
-                plain_text = str(message).replace("\n", " ").replace("\r", " ")
-                self.log_text.append(plain_text)
+                plain_text = str(message).replace("\n", "<br>").replace("\r", "")
+                if plain_text:
+                    self.log_text.append(plain_text)
             except Exception:
                 pass
         # 滚动到底部

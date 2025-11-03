@@ -2,6 +2,8 @@ import sys
 import os
 import logging
 import inspect
+import re
+import html
 from datetime import datetime
 from PySide6.QtWidgets import (
     QMainWindow, QTabWidget, QWidget, QVBoxLayout, QHBoxLayout, 
@@ -9,7 +11,7 @@ from PySide6.QtWidgets import (
     QSpinBox, QGroupBox, QTextEdit, QMessageBox, QSplitter, QFrame,
     QApplication, QInputDialog, QLineEdit
 )
-from app.generic_plugin_widget import GenericPluginWidget
+from app.generic_plugin_widget import GenericPluginWidget, ansi_to_html
 from app.plugin_import_dialog import PluginImportDialog
 from app.plugin_importer import PluginImporter
 from PySide6.QtCore import Qt, Signal, QTimer, QSize, Slot
@@ -665,32 +667,22 @@ class PluginControlPanel(QWidget):
                 if child.text().startswith("状态:"):
                     child.setText(f"状态: {status}")
     
-    def _strip_ansi_and_normalize(self, text: str) -> str:
-        """去除ANSI转义序列，并将多行合并为单行"""
-        import re
-        if not isinstance(text, str):
-            text = str(text)
-        # 去除所有ANSI转义序列：支持 \x1B[, \033[, \u001b[ 以及裸 "[...m"
-        pattern = r"(?:\x1B\[|\033\[|\u001b\[|\[)[0-9;]*m"
-        text = re.sub(pattern, "", text)
-        # 将多行合并为单行：将所有换行符、回车符替换为空格
-        text = text.replace("\r\n", " ").replace("\n", " ").replace("\r", " ")
-        # 合并多个连续空格为单个空格
-        text = re.sub(r" +", " ", text)
-        # 去除首尾空格
-        return text.strip()
-
     def _append_log_with_color(self, message: str):
+        """添加日志信息，支持 ANSI 彩色文本"""
         try:
-            # 去除ANSI序列并合并多行为单行，输出纯文本日志
-            plain_text = self._strip_ansi_and_normalize(str(message) if message is not None else "")
-            if plain_text:
-                self.log_text.append(plain_text)
+            if message is None:
+                return
+            # 将 ANSI 转义序列转换为 HTML 格式
+            html_text = ansi_to_html(str(message))
+            if html_text:
+                # 使用 append 方法添加 HTML 格式的文本（QTextEdit 已设置 setAcceptRichText(True)）
+                self.log_text.append(html_text)
         except Exception:
-            # 降级为纯文本
+            # 降级处理：如果转换失败，尝试直接添加文本
             try:
-                plain_text = str(message).replace("\n", " ").replace("\r", " ")
-                self.log_text.append(plain_text)
+                plain_text = str(message).replace("\n", "<br>").replace("\r", "")
+                if plain_text:
+                    self.log_text.append(plain_text)
             except Exception:
                 pass
     def on_output_generated(self, plugin_id, output):

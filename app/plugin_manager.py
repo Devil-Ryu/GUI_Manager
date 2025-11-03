@@ -329,17 +329,11 @@ def _ensure_io_hooks_installed():
     if not _log_hook_installed:
         try:
             class _AnsiLevelFormatter(logging.Formatter):
-                """日志格式化器，去除ANSI转义序列，使用系统已有的格式配置"""
+                """日志格式化器，保留ANSI转义序列以便在UI中显示彩色文本"""
                 def format(self, record: logging.LogRecord) -> str:
+                    # 保留 ANSI 转义序列，让 UI 层处理转换
                     msg = super().format(record)
-                    try:
-                        # 去除ANSI转义序列（如果存在）
-                        import re
-                        pattern = r"(?:\x1B\[|\033\[|\u001b\[|\[)[0-9;]*m"
-                        msg = re.sub(pattern, "", str(msg))
-                        return msg
-                    except Exception:
-                        return str(msg)
+                    return str(msg)
 
             class _ThreadLocalLoggingHandler(logging.Handler):
                 def emit(self, record: logging.LogRecord):
