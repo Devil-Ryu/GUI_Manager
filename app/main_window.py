@@ -9,7 +9,7 @@ from PySide6.QtWidgets import (
     QMainWindow, QTabWidget, QWidget, QVBoxLayout, QHBoxLayout, 
     QListWidget, QListWidgetItem, QPushButton, QLabel, QCheckBox,
     QSpinBox, QGroupBox, QTextEdit, QMessageBox, QSplitter, QFrame,
-    QApplication, QInputDialog, QLineEdit
+    QApplication, QInputDialog, QLineEdit, QComboBox
 )
 from app.generic_plugin_widget import GenericPluginWidget, ansi_to_html
 from app.plugin_import_dialog import PluginImportDialog
@@ -321,6 +321,16 @@ class PluginControlPanel(QWidget):
         order_layout.addWidget(self.order_spinbox)
         order_layout.addStretch()
         
+        # Python解释器选择
+        python_env_layout = QHBoxLayout()
+        python_env_layout.addWidget(QLabel("Python解释器:"))
+        self.python_env_combo = QComboBox()
+        self.python_env_combo.addItem("使用默认解释器", None)
+        self._refresh_python_env_combo()
+        self.python_env_combo.currentIndexChanged.connect(self.on_python_env_changed)
+        python_env_layout.addWidget(self.python_env_combo)
+        python_env_layout.addStretch()
+        
         button_layout = QHBoxLayout()
         self.start_button = QPushButton("启用")
         self.stop_button = QPushButton("停用")
@@ -339,6 +349,7 @@ class PluginControlPanel(QWidget):
         button_layout.addStretch()
         
         control_layout.addLayout(order_layout)
+        control_layout.addLayout(python_env_layout)
         control_layout.addLayout(button_layout)
         control_group.setLayout(control_layout)
         
@@ -724,6 +735,51 @@ class PluginControlPanel(QWidget):
                     pass
         except Exception:
             pass
+    
+    def _refresh_python_env_combo(self):
+        """刷新Python解释器选择下拉框"""
+        if not hasattr(self, 'python_env_combo'):
+            return
+        
+        # 保存当前选择
+        current_env_id = None
+        current_index = self.python_env_combo.currentIndex()
+        if current_index >= 0:
+            current_env_id = self.python_env_combo.currentData()
+        
+        # 清空并重新填充
+        self.python_env_combo.clear()
+        self.python_env_combo.addItem("使用默认解释器", None)
+        
+        # 从环境管理器获取所有环境
+        if hasattr(self, 'main_window') and self.main_window:
+            env_manager = self.main_window.python_env_widget.get_environment_manager()
+            environments = env_manager.get_all_environments()
+            for env_id, env_data in environments.items():
+                display_name = f"{env_data.get('name', '')} ({env_data.get('version', '')})"
+                self.python_env_combo.addItem(display_name, env_id)
+        
+        # 恢复选择
+        if current_env_id is not None:
+            for i in range(self.python_env_combo.count()):
+                if self.python_env_combo.itemData(i) == current_env_id:
+                    self.python_env_combo.setCurrentIndex(i)
+                    break
+        else:
+            # 加载保存的配置
+            saved_env_id = self.config_manager.get_plugin_python_env(self.plugin.plugin_id)
+            if saved_env_id:
+                for i in range(self.python_env_combo.count()):
+                    if self.python_env_combo.itemData(i) == saved_env_id:
+                        self.python_env_combo.setCurrentIndex(i)
+                        break
+    
+    def on_python_env_changed(self):
+        """Python解释器选择改变"""
+        if not hasattr(self, 'python_env_combo'):
+            return
+        env_id = self.python_env_combo.currentData()
+        self.config_manager.set_plugin_python_env(self.plugin.plugin_id, env_id)
 
 
 class PluginUIWidget(QWidget):
@@ -804,6 +860,7 @@ class PluginUIWidget(QWidget):
 
 
 from app.status_monitor import StatusMonitorWidget
+from app.python_env_widget import PythonEnvironmentWidget
 
 
 class MainWindow(QMainWindow):
@@ -820,7 +877,14 @@ class MainWindow(QMainWindow):
         # 初始化状态监控组件
         self.status_monitor = StatusMonitorWidget(self.plugin_manager)
         
+        # 设置环境管理器引用到BasePlugin，以便插件可以访问
+        from app.plugin_manager import BasePlugin
+        BasePlugin._env_manager_ref = lambda: self.python_env_widget.get_environment_manager() if hasattr(self, 'python_env_widget') else None
+        
         self.setup_ui()
+        
+        # 重新设置环境管理器引用（setup_ui后python_env_widget才创建）
+        BasePlugin._env_manager_ref = lambda: self.python_env_widget.get_environment_manager()
         # 应用主题（根据配置）
         self._apply_theme(self.config_manager.get_theme())
         # 应用保存的字体大小
@@ -1056,6 +1120,11 @@ class MainWindow(QMainWindow):
         self.setup_plugin_tab()
         self.tab_widget.addTab(self.plugin_tab, "插件管理")
         
+        # Python环境管理选项卡
+        self.python_env_widget = PythonEnvironmentWidget(self.config_manager, self)
+        self.python_env_widget.environment_changed.connect(self.on_python_env_changed)
+        self.tab_widget.addTab(self.python_env_widget, "Python环境管理")
+        
         # 状态监控选项卡
         self.tab_widget.addTab(self.status_monitor, "状态监控")
         
@@ -1180,6 +1249,14 @@ class MainWindow(QMainWindow):
         # 添加到选项卡布局
         tab_layout = QVBoxLayout(self.plugin_tab)
         tab_layout.addWidget(splitter)
+    
+    def on_python_env_changed(self):
+        """Python环境列表变化时的回调"""
+        # 刷新所有插件控制面板的Python解释器选择框
+        if hasattr(self, 'right_layout') and self.right_layout.count() > 0:
+            panel = self.right_layout.itemAt(0).widget()
+            if panel and hasattr(panel, '_refresh_python_env_combo'):
+                panel._refresh_python_env_combo()
 
     def on_apply_font_size_clicked(self):
         """点击“应用”后再设置字体大小，使用异步调用避免卡顿"""
@@ -1360,12 +1437,35 @@ class MainWindow(QMainWindow):
         current_tab_index = self.tab_widget.currentIndex()
         
         # 清空插件UI选项卡
-        # 先获取非内置标签页的数量（插件管理、状态监控）
-        builtin_tabs_count = 2  # 假设前两个标签页是内置的
+        # 先获取非内置标签页的数量（插件管理、Python环境管理、状态监控）
+        builtin_tabs_count = 3  # 插件管理、Python环境管理、状态监控
         
-        # 从后往前移除标签页，避免索引变化问题
-        while self.tab_widget.count() > builtin_tabs_count:
-            self.tab_widget.removeTab(builtin_tabs_count)
+        # 保存插件UI选项卡的引用，以便在刷新后恢复
+        saved_plugin_tabs = {}
+        for plugin_id, (widget, tab_index) in list(self.plugin_ui_tabs.items()):
+            # 保存插件ID和对应的widget引用
+            plugin = self.plugin_manager.get_plugin(plugin_id)
+            if plugin:
+                saved_plugin_tabs[plugin_id] = {
+                    'plugin': plugin,
+                    'widget': widget,
+                    'had_tab': True
+                }
+        
+        # 从后往前移除插件UI标签页，避免索引变化问题
+        # 先找到所有插件tab的索引
+        plugin_tab_indices = []
+        for i in range(self.tab_widget.count()):
+            widget = self.tab_widget.widget(i)
+            for plugin_id, (saved_widget, _) in list(self.plugin_ui_tabs.items()):
+                if widget is saved_widget:
+                    plugin_tab_indices.append(i)
+                    break
+        
+        # 从大到小排序，从后往前删除
+        plugin_tab_indices.sort(reverse=True)
+        for idx in plugin_tab_indices:
+            self.tab_widget.removeTab(idx)
         
         # 清空插件UI选项卡字典
         self.plugin_ui_tabs.clear()
@@ -1394,6 +1494,14 @@ class MainWindow(QMainWindow):
         for plugin in self._get_plugins_in_display_order():
             self.status_monitor.add_plugin(plugin.plugin_id, plugin.name)
             self.status_monitor.update_plugin_status(plugin.plugin_id, "已停止" if not plugin.is_running else "运行中")
+        
+        # 恢复之前有Tab的插件UI（如果插件仍然存在）
+        for plugin_id, saved_info in saved_plugin_tabs.items():
+            plugin = self.plugin_manager.get_plugin(plugin_id)
+            if plugin and saved_info.get('had_tab', False):
+                # 检查是否应该自动启动
+                if self.config_manager.is_plugin_auto_start(plugin_id):
+                    self._show_plugin_tab(plugin)
         
         # 清空右侧布局
         for i in reversed(range(self.right_layout.count())):

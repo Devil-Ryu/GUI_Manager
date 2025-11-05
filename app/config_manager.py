@@ -255,3 +255,20 @@ class ConfigManager:
         window_config['height'] = height
         window_config['maximized'] = maximized
         self.set_window_config(window_config)
+    
+    def get_python_environments(self):
+        """获取Python环境配置"""
+        return self.main_config.get('python_environments', {})
+    
+    def save_python_environments(self, environments):
+        """保存Python环境配置"""
+        self.main_config['python_environments'] = environments
+        self.save_main_config()
+    
+    def get_plugin_python_env(self, plugin_id):
+        """获取插件使用的Python环境ID"""
+        return self.get_plugin_setting(plugin_id, 'python_env_id', None)
+    
+    def set_plugin_python_env(self, plugin_id, env_id):
+        """设置插件使用的Python环境ID"""
+        self.set_plugin_setting(plugin_id, 'python_env_id', env_id)

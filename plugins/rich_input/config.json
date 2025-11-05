@@ -1,0 +1,8 @@
+{
+    "plugin_id": "rich_input",
+    "plugin_name": "rich_input",
+    "has_ui": false,
+    "plugin_entry": "test_input.py",
+    "plugin_function": "test_rich_input",
+    "parameters": []
+}

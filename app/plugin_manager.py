@@ -3,6 +3,8 @@ import sys
 import importlib.util
 import threading
 import logging
+import subprocess
+import json
 from abc import ABC, abstractmethod
 from PySide6.QtWidgets import QWidget
 from PySide6.QtCore import QObject, Signal
@@ -594,7 +596,26 @@ class BasePlugin(ABC):
             pass
 
         self._stop_event.clear()
-        self._thread = threading.Thread(target=self._run_wrapper)
+        # 检查是否指定了Python解释器
+        python_interpreter = None
+        if self.config_manager:
+            env_id = self.config_manager.get_plugin_python_env(self.plugin_id)
+            if env_id:
+                # 从配置管理器获取环境管理器（需要通过全局变量或单例访问）
+                try:
+                    # 尝试从BasePlugin类获取环境管理器引用
+                    if hasattr(BasePlugin, '_env_manager_ref'):
+                        env_manager = BasePlugin._env_manager_ref()
+                        if env_manager:
+                            python_interpreter = env_manager.get_environment_path(env_id)
+                except Exception:
+                    pass
+        
+        # 如果指定了Python解释器，使用subprocess方式运行
+        if python_interpreter and os.path.exists(python_interpreter):
+            self._thread = threading.Thread(target=self._run_with_subprocess, args=(python_interpreter,))
+        else:
+            self._thread = threading.Thread(target=self._run_wrapper)
         self._thread.daemon = True
         self._thread.start()
     
@@ -900,6 +921,166 @@ class BasePlugin(ABC):
     def run(self):
         """插件的主要运行逻辑"""
         pass
+    
+    def _run_with_subprocess(self, python_interpreter: str):
+        """使用指定的Python解释器通过subprocess运行插件"""
+        try:
+            self.is_running = True
+            self.signals.status_changed.emit(self.plugin_id, "running")
+            
+            # 获取入口文件路径和函数名
+            entry_path = getattr(self, "_entry_module_path", None)
+            entry_func = getattr(self, "_entry_function_name", None)
+            
+            if not entry_path or not os.path.exists(entry_path):
+                self.log_output(f"错误: 插件入口文件不存在: {entry_path}")
+                self.is_running = False
+                self.signals.status_changed.emit(self.plugin_id, "stopped")
+                return
+            
+            # 获取参数
+            params = getattr(self, 'parameters_values', {}) or {}
+            
+            # 创建临时脚本文件来运行插件
+            import tempfile
+            plugin_dir = os.path.dirname(entry_path)
+            
+            # 构建运行脚本
+            script_content = f"""import sys
+import os
+import json
+
+# 切换到插件目录
+os.chdir(r"{plugin_dir}")
+
+# 添加插件目录到路径
+sys.path.insert(0, r"{plugin_dir}")
+
+# 导入入口模块
+import importlib.util
+spec = importlib.util.spec_from_file_location("plugin_entry", r"{entry_path}")
+if spec is None or spec.loader is None:
+    print("错误: 无法加载入口模块")
+    sys.exit(1)
+
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+
+# 获取参数
+params = {json.dumps(params, ensure_ascii=False)}
+
+# 调用入口函数
+entry_func = None
+target_function = "{entry_func}"
+"""
+            
+            # 处理函数调用
+            if entry_func and '.' in entry_func:
+                # 类方法
+                class_name, method_name = entry_func.split('.', 1)
+                script_content += f"""
+class_name, method_name = "{class_name}", "{method_name}"
+if hasattr(module, class_name):
+    cls = getattr(module, class_name)
+    import inspect
+    if inspect.isclass(cls):
+        try:
+            instance = cls()
+            if hasattr(instance, method_name):
+                entry_func = getattr(instance, method_name)
+        except:
+            if hasattr(cls, method_name):
+                entry_func = getattr(cls, method_name)
+"""
+            else:
+                # 普通函数
+                script_content += f"""
+if hasattr(module, target_function):
+    entry_func = getattr(module, target_function)
+"""
+            
+            script_content += """
+if entry_func is None:
+    print(f"错误: 未找到入口函数 {target_function}")
+    sys.exit(1)
+
+# 调用函数
+try:
+    entry_func()
+except TypeError:
+    try:
+        entry_func(params)
+    except TypeError:
+        try:
+            entry_func(**params)
+        except TypeError as e:
+            print(f"错误: 调用函数失败: {e}")
+            import traceback
+            traceback.print_exc()
+            sys.exit(1)
+except Exception as e:
+    print(f"错误: {e}")
+    import traceback
+    traceback.print_exc()
+    sys.exit(1)
+"""
+            
+            # 创建临时脚本文件
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False, encoding='utf-8') as f:
+                f.write(script_content)
+                temp_script = f.name
+            
+            try:
+                # 运行脚本
+                process = subprocess.Popen(
+                    [python_interpreter, temp_script],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    bufsize=1,
+                    universal_newlines=True
+                )
+                
+                # 注册子进程以便停止时清理
+                self.register_subprocess(process)
+                
+                # 实时读取输出
+                try:
+                    while True:
+                        if self.is_stopped() or self._stop_event.is_set():
+                            process.terminate()
+                            break
+                        
+                        line = process.stdout.readline()
+                        if not line:
+                            if process.poll() is not None:
+                                break
+                            continue
+                        
+                        # 输出到日志
+                        self.log_output(line.rstrip())
+                        
+                except Exception as e:
+                    logger.error(f"读取插件输出时出错: {e}")
+                
+                # 等待进程结束
+                if process.poll() is None:
+                    process.wait(timeout=1)
+                
+            finally:
+                # 清理临时文件
+                try:
+                    os.unlink(temp_script)
+                except Exception:
+                    pass
+                self.unregister_subprocess(process)
+                
+        except Exception as e:
+            logger.error(f"使用subprocess运行插件失败: {e}")
+            self.log_output(f"运行失败: {e}")
+        finally:
+            self.is_running = False
+            self.signals.status_changed.emit(self.plugin_id, "stopped")
     
     def is_stopped(self):
         """检查是否收到停止信号"""

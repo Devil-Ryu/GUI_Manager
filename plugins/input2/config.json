@@ -1,0 +1,8 @@
+{
+    "plugin_id": "input2",
+    "plugin_name": "Input2",
+    "has_ui": false,
+    "plugin_entry": "test_input.py",
+    "plugin_function": "test_input2",
+    "parameters": []
+}

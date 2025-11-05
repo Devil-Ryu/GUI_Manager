@@ -9,8 +9,8 @@ import inspect
 
 logger = logging.getLogger(__name__)
 
-class TestplugincasePlugin(BasePlugin):
-    """Test Plugin Case
+class RichinputPlugin(BasePlugin):
+    """rich_input
     这是通过插件导入功能创建的插件类"""
 
     def __init__(self, plugin_id, config_manager=None):
@@ -20,17 +20,17 @@ class TestplugincasePlugin(BasePlugin):
         # 存储参数值
         self.parameters_values = {
         }
-        self._entry_module_path = os.path.join(os.path.dirname(__file__), 'rich_print_case.py')
-        self._entry_module_name = 'rich_print_case'
-        self._entry_function_name = 'testRich'
+        self._entry_module_path = os.path.join(os.path.dirname(__file__), 'test_input.py')
+        self._entry_module_name = 'test_input'
+        self._entry_function_name = 'test_rich_input'
 
     @property
     def name(self):
-        return "Test Plugin Case"
+        return "rich_input"
 
     @property
     def description(self):
-        return "Test Plugin Case的描述"
+        return "rich_input的描述"
         
     @property
     def has_ui(self):

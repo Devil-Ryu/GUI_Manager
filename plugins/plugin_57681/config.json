@@ -1,0 +1,8 @@
+{
+    "plugin_id": "plugin_57681",
+    "plugin_name": "解释器测试",
+    "has_ui": false,
+    "plugin_entry": "test_interpreter.py",
+    "plugin_function": "test_interpreter",
+    "parameters": []
+}
