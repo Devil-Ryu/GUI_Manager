@@ -2242,12 +2242,6 @@ class MainWindow(QMainWindow):
                         return
                 except Exception:
                     pass
-                # 提示到日志（不打印密码提示的具体内容）
-                try:
-                    tip = prompt or "请输入："
-                    plugin.log_output("等待输入…" if password else f"等待输入：{tip}")
-                except Exception:
-                    pass
                 # 尝试聚焦对应界面的输入框
                 try:
                     # 如果是通用插件界面
@@ -2277,6 +2271,16 @@ class MainWindow(QMainWindow):
                 # 仅当该插件确实正在等待 stdin 时，才允许回退投递
                 if getattr(plugin, "_waiting_on_stdin", False):
                     try:
+                        # 优先通过子进程输入流（用于指定解释器运行）
+                        input_stream = getattr(plugin, "_input_stream", None)
+                        if input_stream is not None and hasattr(input_stream, "put_text"):
+                            try:
+                                input_stream.put_text(text or "")
+                                plugin.log_output("已提交手动输入到标准输入。")
+                                return
+                            except Exception:
+                                pass
+                        # 兼容旧的线程内 stdin 队列路径
                         stdin_q = getattr(plugin, "_stdin_queue", None)
                         if stdin_q is not None:
                             # 防止队列已满导致 UI 阻塞，先尝试清空再非阻塞投递

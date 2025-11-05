@@ -611,8 +611,16 @@ class BasePlugin(ABC):
                 except Exception:
                     pass
         
-        # 如果指定了Python解释器，使用subprocess方式运行
+        # 如果指定了Python解释器，使用subprocess方式运行（但要避免使用当前GUI可执行自身）
         if python_interpreter and os.path.exists(python_interpreter):
+            try:
+                import sys as _sys, os as _os
+                # 若是打包的 GUI 自身或与当前可执行同文件，放弃子进程解释器，改为线程运行
+                if (_os.path.samefile(python_interpreter, _sys.executable) and getattr(_sys, 'frozen', False)):
+                    python_interpreter = None
+            except Exception:
+                pass
+        if python_interpreter:
             self._thread = threading.Thread(target=self._run_with_subprocess, args=(python_interpreter,))
         else:
             self._thread = threading.Thread(target=self._run_wrapper)
@@ -859,7 +867,7 @@ class BasePlugin(ABC):
                 # 如果可能，开启真彩色，避免退化为 16 色
                 _os.environ.setdefault("RICH_COLOR_SYSTEM", "truecolor")
                 # 增大终端宽度，减少表格/JSON 的软换行
-                _os.environ.setdefault("COLUMNS", "160")
+                _os.environ.setdefault("COLUMNS", "10000")
                 # 强制 rich 使用 VT/ANSI 输出与真彩
                 try:
                     # 尝试启用 Windows VT 支持
@@ -871,7 +879,7 @@ class BasePlugin(ABC):
                     import rich as _rich
                     _rich.reconfigure(
                         force_terminal=True, legacy_windows=False,
-                        color_system="truecolor", width=160
+                        color_system="truecolor", width=10000, soft_wrap=True
                     )
                     # 全局覆盖 Console() 构造，确保任意 Console() 均启用 ANSI/truecolor/宽度
                     try:
@@ -882,7 +890,8 @@ class BasePlugin(ABC):
                             force_terminal=True,
                             legacy_windows=False,
                             color_system="truecolor",
-                            width=160,
+                            width=10000,
+                            soft_wrap=True,
                         )
                     except Exception:
                         pass
@@ -956,6 +965,42 @@ os.chdir(r"{plugin_dir}")
 # 添加插件目录到路径
 sys.path.insert(0, r"{plugin_dir}")
 
+# 配置子进程的终端/颜色/宽度，避免打包后长行被换行
+try:
+    import os as _os
+    _os.environ.setdefault("TERM", "xterm-256color")
+    _os.environ.setdefault("PY_COLORS", "1")
+    _os.environ.setdefault("RICH_FORCE_TERMINAL", "1")
+    _os.environ.setdefault("RICH_COLOR_SYSTEM", "truecolor")
+    _os.environ.setdefault("COLUMNS", "10000")  # 扩大列宽以避免换行
+except Exception:
+    pass
+
+try:
+    import rich as _rich
+    _rich.reconfigure(
+        force_terminal=True,
+        legacy_windows=False,
+        color_system="truecolor",
+        width=10000,
+        soft_wrap=True,
+    )
+    try:
+        from rich.console import Console as _Console
+        from functools import partial as _partial
+        _rich.console.Console = _partial(
+            _Console,
+            force_terminal=True,
+            legacy_windows=False,
+            color_system="truecolor",
+            width=10000,
+            soft_wrap=True,
+        )
+    except Exception:
+        pass
+except Exception:
+    pass
+
 # 导入入口模块
 import importlib.util
 spec = importlib.util.spec_from_file_location("plugin_entry", r"{entry_path}")
@@ -965,6 +1010,26 @@ if spec is None or spec.loader is None:
 
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
+
+# 重写 input 以与主进程桥接
+_INPUT_TAG = "__GUI_MANAGER_INPUT_REQUEST__:"
+def _bridged_input(prompt: str = "") -> str:
+    try:
+        # 发出输入请求标记，主进程将捕获该行并通过 stdin 写回
+        print(_INPUT_TAG + (prompt or ""), flush=True)
+        # 从 stdin 读取一行作为用户输入
+        line = sys.stdin.readline()
+        if not line:
+            return ""
+        return line.rstrip("\\r\\n")
+    except Exception:
+        return ""
+
+try:
+    import builtins as _b
+    _b.input = _bridged_input
+except Exception:
+    pass
 
 # 获取参数
 params = {json.dumps(params, ensure_ascii=False)}
@@ -1034,6 +1099,7 @@ except Exception as e:
                 # 运行脚本
                 process = subprocess.Popen(
                     [python_interpreter, temp_script],
+                    stdin=subprocess.PIPE,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT,
                     text=True,
@@ -1043,9 +1109,25 @@ except Exception as e:
                 
                 # 注册子进程以便停止时清理
                 self.register_subprocess(process)
+                # 暴露输入流接口给 UI 手动输入
+                class _InputStream:
+                    def __init__(self, p):
+                        self._p = p
+                    def put_text(self, text: str):
+                        try:
+                            if self._p and self._p.stdin:
+                                self._p.stdin.write((text or "") + "\n")
+                                self._p.stdin.flush()
+                        except Exception:
+                            pass
+                try:
+                    setattr(self, "_input_stream", _InputStream(process))
+                except Exception:
+                    pass
                 
                 # 实时读取输出
                 try:
+                    INPUT_TAG = "__GUI_MANAGER_INPUT_REQUEST__:"
                     while True:
                         if self.is_stopped() or self._stop_event.is_set():
                             process.terminate()
@@ -1057,8 +1139,25 @@ except Exception as e:
                                 break
                             continue
                         
-                        # 输出到日志
-                        self.log_output(line.rstrip())
+                        s = line.rstrip("\r\n")
+                        # 处理输入请求标记
+                        if INPUT_TAG in s:
+                            # 子进程请求输入：设置等待标记，并移除控制标记后仅在有剩余文本时输出
+                            try:
+                                setattr(self, "_waiting_on_stdin", True)
+                            except Exception:
+                                pass
+                            try:
+                                cleaned = s.replace(INPUT_TAG, "").strip()
+                                # 去掉末尾多余的冒号和空格
+                                cleaned = cleaned.rstrip(": ")
+                                if cleaned:
+                                    self.log_output(cleaned)
+                            except Exception:
+                                pass
+                            continue
+                        # 普通输出到日志
+                        self.log_output(s)
                         
                 except Exception as e:
                     logger.error(f"读取插件输出时出错: {e}")
@@ -1074,6 +1173,10 @@ except Exception as e:
                 except Exception:
                     pass
                 self.unregister_subprocess(process)
+                try:
+                    setattr(self, "_waiting_on_stdin", False)
+                except Exception:
+                    pass
                 
         except Exception as e:
             logger.error(f"使用subprocess运行插件失败: {e}")

@@ -45,6 +45,15 @@ class PythonEnvironmentManager:
         """添加当前Python解释器作为默认环境"""
         current_path = sys.executable
         if current_path:
+            # 若为打包后的可执行文件（PyInstaller 等），不要作为可选解释器加入，避免递归启动
+            try:
+                if getattr(sys, 'frozen', False):
+                    return
+                base = os.path.basename(current_path).lower()
+                if not self._is_valid_python_interpreter(current_path):
+                    return
+            except Exception:
+                pass
             env_id = "default"
             try:
                 version = self._get_python_version(current_path)
@@ -85,20 +94,8 @@ class PythonEnvironmentManager:
             return False, f"路径不存在: {path}"
         
         # 检查是否为有效的Python解释器
-        if platform.system() == 'Windows':
-            # Windows上可能是python.exe或pythonw.exe
-            if not (path.endswith('python.exe') or path.endswith('pythonw.exe')):
-                # 尝试查找python.exe
-                dir_path = os.path.dirname(path)
-                python_exe = os.path.join(dir_path, 'python.exe')
-                if os.path.exists(python_exe):
-                    path = python_exe
-                else:
-                    return False, "指定的路径不是有效的Python解释器"
-        else:
-            # Unix-like系统
-            if not os.access(path, os.X_OK):
-                return False, "指定的路径不是可执行文件"
+        if not self._is_valid_python_interpreter(path):
+            return False, "指定的路径不是有效的Python解释器"
         
         # 验证是否为Python解释器
         try:
@@ -289,8 +286,17 @@ class PythonEnvironmentManager:
                     if not os.path.exists(python_path):
                         continue
                     
+                    # 过滤当前可执行文件，避免递归调用自身
+                    try:
+                        if os.path.samefile(match if os.path.isfile(match) else python_path, sys.executable):
+                            continue
+                    except Exception:
+                        pass
+
                     # 验证并获取版本
                     try:
+                        if not self._is_valid_python_interpreter(python_path):
+                            continue
                         version = self._get_python_version(python_path)
                         if "Python" in version or "python" in version.lower():
                             # 生成环境名称
@@ -320,4 +326,35 @@ class PythonEnvironmentManager:
                 unique_envs.append(env)
         
         return unique_envs
+
+    def _is_valid_python_interpreter(self, path: str) -> bool:
+        """判断给定路径是否为可用的 Python 解释器。
+
+        - 过滤打包后的 GUI 可执行文件（如 app.exe）
+        - Windows: 只允许 python.exe / pythonw.exe
+        - Unix: 需要可执行，且文件名形如 python / python3 / python3.x
+        """
+        if not path or not os.path.exists(path):
+            return False
+        try:
+            base = os.path.basename(path).lower()
+            # 屏蔽当前应用可执行文件
+            try:
+                if os.path.samefile(path, sys.executable) and getattr(sys, 'frozen', False):
+                    return False
+            except Exception:
+                pass
+            if platform.system() == 'Windows':
+                if base not in ("python.exe", "pythonw.exe"):
+                    return False
+                return True
+            else:
+                if not os.access(path, os.X_OK):
+                    return False
+                # 名称匹配 python, python3, python3.x
+                if base.startswith("python"):
+                    return True
+                return False
+        except Exception:
+            return False
 
