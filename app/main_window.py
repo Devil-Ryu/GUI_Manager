@@ -686,8 +686,8 @@ class PluginControlPanel(QWidget):
             # 将 ANSI 转义序列转换为 HTML 格式
             html_text = ansi_to_html(str(message))
             if html_text:
-                # 使用 append 方法添加 HTML 格式的文本（QTextEdit 已设置 setAcceptRichText(True)）
-                self.log_text.append(html_text)
+                # 使用 span + white-space:pre 保留连续空格/制表符/换行
+                self.log_text.append(f'<span style="white-space:pre;">{html_text}</span>')
         except Exception:
             # 降级处理：如果转换失败，尝试直接添加文本
             try:
